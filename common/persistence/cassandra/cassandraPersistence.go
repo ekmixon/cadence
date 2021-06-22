@@ -783,9 +783,6 @@ func (d *cassandraPersistence) CreateWorkflowExecution(
 	domainID := executionInfo.DomainID
 	workflowID := executionInfo.WorkflowID
 	runID := executionInfo.RunID
-	checkSum := newWorkflow.Checksum
-	versionHistories := newWorkflow.VersionHistories
-	nowTimestamp := time.Now()
 
 	if err := p.ValidateCreateWorkflowModeState(
 		request.Mode,
@@ -794,41 +791,15 @@ func (d *cassandraPersistence) CreateWorkflowExecution(
 		return nil, err
 	}
 
-	currentWorkflowWriteReq, err := d.prepareCurrentWorkflowForCreateWorkflowTxn(domainID, workflowID, runID, executionInfo, lastWriteVersion, request)
+	currentWorkflowWriteReq, err := d.prepareCurrentWorkflowRequestForWorkflowTxn(domainID, workflowID, runID, executionInfo, lastWriteVersion, request)
 	if err != nil {
 		return nil, err
 	}
 
-	execution, err := d.prepareWorkflowExecutionForCreateWorkflowTxn(
-		executionInfo, versionHistories, checkSum,
-		nowTimestamp, lastWriteVersion,
-	)
+	workflowExecutionWriteReq, err := d.prepareWorkflowExecutionRequestWithMergeMaps(&newWorkflow)
 	if err != nil {
 		return nil, err
 	}
-
-	execution.ActivityInfos, err = d.prepareActivityInfosForWorkflowTxn(newWorkflow.ActivityInfos)
-	if err != nil {
-		return nil, err
-	}
-	execution.TimerInfos, err = d.prepareTimerInfosForWorkflowTxn(newWorkflow.TimerInfos)
-	if err != nil {
-		return nil, err
-	}
-	execution.ChildWorkflowInfos, err = d.prepareChildWFInfosForWorkflowTxn(newWorkflow.ChildExecutionInfos)
-	if err != nil {
-		return nil, err
-	}
-	execution.RequestCancelInfos, err = d.prepareRequestCancelsForWorkflowTxn(newWorkflow.RequestCancelInfos)
-	if err != nil {
-		return nil, err
-	}
-	execution.SignalInfos, err = d.prepareSignalInfosForWorkflowTxn(newWorkflow.SignalInfos)
-	if err != nil {
-		return nil, err
-	}
-	execution.SignalRequestedIDs = newWorkflow.SignalRequestedIDs
-	execution.MapsWriteMode = nosqlplugin.WorkflowExecutionMapsWriteModeAdd
 
 	transferTasks, err := d.prepareTransferTasksForWorkflowTxn(domainID, workflowID, runID, newWorkflow.TransferTasks)
 	if err != nil {
@@ -857,7 +828,7 @@ func (d *cassandraPersistence) CreateWorkflowExecution(
 
 	err = d.db.InsertWorkflowExecutionWithTasks(
 		ctx,
-		currentWorkflowWriteReq, execution,
+		currentWorkflowWriteReq, workflowExecutionWriteReq,
 		transferTasks, crossClusterTasks, replicationTasks, timerTasks,
 		shardCondition,
 	)
@@ -900,6 +871,48 @@ func (d *cassandraPersistence) CreateWorkflowExecution(
 	}
 
 	return &p.CreateWorkflowExecutionResponse{}, nil
+}
+
+func (d *cassandraPersistence) prepareWorkflowExecutionRequestWithMergeMaps(
+	newWorkflow *p.InternalWorkflowSnapshot,
+) (*nosqlplugin.WorkflowExecutionRequest, error) {
+	executionInfo := newWorkflow.ExecutionInfo
+	lastWriteVersion := newWorkflow.LastWriteVersion
+	checkSum := newWorkflow.Checksum
+	versionHistories := newWorkflow.VersionHistories
+	nowTimestamp := time.Now()
+
+	executionRequest, err := d.prepareWorkflowExecutionForCreateWorkflowTxn(
+		executionInfo, versionHistories, checkSum,
+		nowTimestamp, lastWriteVersion,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	executionRequest.ActivityInfos, err = d.prepareActivityInfosForWorkflowTxn(newWorkflow.ActivityInfos)
+	if err != nil {
+		return nil, err
+	}
+	executionRequest.TimerInfos, err = d.prepareTimerInfosForWorkflowTxn(newWorkflow.TimerInfos)
+	if err != nil {
+		return nil, err
+	}
+	executionRequest.ChildWorkflowInfos, err = d.prepareChildWFInfosForWorkflowTxn(newWorkflow.ChildExecutionInfos)
+	if err != nil {
+		return nil, err
+	}
+	executionRequest.RequestCancelInfos, err = d.prepareRequestCancelsForWorkflowTxn(newWorkflow.RequestCancelInfos)
+	if err != nil {
+		return nil, err
+	}
+	executionRequest.SignalInfos, err = d.prepareSignalInfosForWorkflowTxn(newWorkflow.SignalInfos)
+	if err != nil {
+		return nil, err
+	}
+	executionRequest.SignalRequestedIDs = newWorkflow.SignalRequestedIDs
+	executionRequest.MapsWriteMode = nosqlplugin.WorkflowExecutionMapsWriteModeMerge
+	return executionRequest, nil
 }
 
 func (d *cassandraPersistence) prepareTimerTasksForWorkflowTxn(
@@ -1285,7 +1298,7 @@ func (d *cassandraPersistence) prepareWorkflowExecutionForCreateWorkflowTxn(
 	}, nil
 }
 
-func (d *cassandraPersistence) prepareCurrentWorkflowForCreateWorkflowTxn(
+func (d *cassandraPersistence) prepareCurrentWorkflowRequestForWorkflowTxn(
 	domainID, workflowID, runID string,
 	executionInfo *p.InternalWorkflowExecutionInfo,
 	lastWriteVersion int64,
